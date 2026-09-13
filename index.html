@@ -7,6 +7,8 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="color-scheme" content="light dark">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <title>PPL Tracker</title>
 <style>
   :root{
@@ -342,22 +344,25 @@ async function syncToSheet(manual){
   const el=document.getElementById('syncStatus'); const set=(cls,msg)=>{ if(el){ el.className='sync '+cls; el.textContent=msg; } };
   set('','Syncing…');
   try{
-    const payload={state:{...state,sheetUrl:undefined},...flatRows(),savedAt:new Date().toISOString()};
+    if(!navigator.onLine){ set('err','Offline — saved on the phone, will sync when back online'); return; }
+    const payload={key:state.syncKey||'',state:{...state,sheetUrl:undefined,syncKey:undefined},...flatRows(),savedAt:new Date().toISOString()};
     const r=await fetch(state.sheetUrl,{method:'POST',body:JSON.stringify(payload)});
-    const j=await r.json(); if(!j.ok) throw new Error(j.error||'sheet rejected');
+    const j=await r.json(); if(!j.ok) throw new Error(j.error==='bad key'?'passphrase does not match the script':(j.error||'sheet rejected'));
     state.lastSync=Date.now(); try{ localStorage.setItem(KEY,JSON.stringify(state)); }catch(e){}
     set('ok','Synced '+new Date().toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})); if(manual) toast('Synced to Google Sheets');
   }catch(err){ set('err','Sync failed — check the script URL and that it is deployed to "Anyone"'); if(manual) toast('Sync failed: '+err.message); }
 }
 async function restoreFromSheet(){
   if(!state.sheetUrl) return toast('Add your script URL first');
-  try{ const r=await fetch(state.sheetUrl); const s=await r.json(); if(!s||!s.log) throw new Error('no backup in sheet');
-    const url=state.sheetUrl; state=Object.assign(defaultState(),s,{sheetUrl:url}); applyTheme(); save(); render(); toast('Restored from Google Sheets');
+  try{ const r=await fetch(state.sheetUrl+(state.sheetUrl.includes('?')?'&':'?')+'key='+encodeURIComponent(state.syncKey||'')); const s=await r.json(); if(s&&s.error==='bad key') throw new Error('passphrase does not match the script'); if(!s||!s.log) throw new Error('no backup in sheet');
+    const url=state.sheetUrl, key=state.syncKey; state=Object.assign(defaultState(),s,{sheetUrl:url,syncKey:key}); applyTheme(); save(); render(); toast('Restored from Google Sheets');
   }catch(err){ toast('Restore failed: '+err.message); }
 }
 const APPS_SCRIPT=`// Google Apps Script — paste into Extensions → Apps Script of a blank Google Sheet
+var SECRET='PASTE-YOUR-PASSPHRASE-HERE';   // must match the sync passphrase in the app's Settings
 function doPost(e){
   var d=JSON.parse(e.postData.contents), ss=SpreadsheetApp.getActiveSpreadsheet();
+  if(!SECRET||d.key!==SECRET) return out({ok:false,error:'bad key'});
   table(ss,'Sets',['Cal week','Program week','Day','Exercise','Set','Weight','Reps','RIR','Week of'],d.sets);
   table(ss,'Sessions',['Cal week','Program week','Day','Done','Minutes','Readiness','Cardio','Cardio min','Avg HR','Notes'],d.sessions);
   table(ss,'Body',['Week','Weight','Waist'],d.body);
@@ -367,6 +372,7 @@ function doPost(e){
   return out({ok:true});
 }
 function doGet(e){
+  if(!SECRET||!e||!e.parameter||e.parameter.key!==SECRET) return out({error:'bad key'});
   var sh=SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Backup'); if(!sh) return out({});
   var v=sh.getDataRange().getValues(), s='';
   for(var i=1;i<v.length;i++) if(v[i][0]==='chunk') s+=v[i][1];
@@ -376,7 +382,7 @@ function table(ss,name,head,rows){ var sh=ss.getSheetByName(name)||ss.insertShee
 function out(o){ return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON); }`;
 
 /* =========================== STATE =========================== */
-function defaultState(){ return {start:'2026-09-14',unit:'kg',height:160,theme:'auto',body:{1:80},waist:{},log:{},repeats:[],focus:[],sheetUrl:'',lastSync:null}; }
+function defaultState(){ return {start:'2026-09-14',unit:'kg',height:160,theme:'auto',body:{1:80},waist:{},log:{},repeats:[],focus:[],sheetUrl:'',syncKey:'',lastSync:null}; }
 let state=defaultState();
 let week=1,dayIdx=0,view='log',range='12',dashLift='0:0';
 let tick=null, rest={end:0,total:0,timer:null}, audio=null;
@@ -733,6 +739,8 @@ function renderSettings(){
     <ol><li>Create a blank Google Sheet → Extensions → Apps Script.</li><li>Delete what's there, paste the script below, save.</li><li>Deploy → New deployment → type "Web app" → Execute as <b>Me</b>, access <b>Anyone</b> → Deploy, approve access.</li><li>Copy the Web app URL and paste it here.</li></ol>
     <div class="btnrow" style="margin:0 0 8px"><button class="btn" id="copyScript">Copy the Apps Script code</button></div>
     <input type="url" id="sheetUrl" placeholder="https://script.google.com/macros/s/…/exec" value="${state.sheetUrl||''}">
+    <label for="syncKey" style="margin-top:10px">Sync passphrase</label><p>Locks the sheet so only this app can write to it. Put the same text in the script's SECRET line (first line), then Deploy → Manage deployments → edit → New version.</p>
+    <div class="btnrow" style="margin:0"><input type="text" id="syncKey" placeholder="e.g. a long random phrase" value="${state.syncKey||''}" style="flex:1;height:42px;border:1px solid var(--line);border-radius:10px;padding:0 10px;background:var(--field)"><button class="btn" id="genKey" style="flex:0 0 auto">Generate</button></div>
     <div class="btnrow"><button class="btn primary" id="syncNow">Sync now</button><button class="btn" id="restoreSheet">Restore from sheet</button></div>
     <div class="sync ${state.lastSync?'ok':''}" id="syncStatus" style="margin-top:6px">${state.sheetUrl?(state.lastSync?'Last synced '+new Date(state.lastSync).toLocaleString():'Not synced yet'):'Not connected — data lives in this browser only'}</div></div>
   <div class="field"><label>Lagging muscles (extra set in weeks 25–36)</label><p>Pick 1–3 exercises to get one more working set during the Specialization phase.</p>${DAYS.map((d,di)=>`<div class="focus"><span>${d.name}</span>${d.slots.map((sl,si)=>sl.abs?'':`<button data-focus="${di}:${si}" class="${(state.focus||[]).includes(di+':'+si)?'on':''}">${sl.v[0]}</button>`).join('')}</div>`).join('')}</div>
@@ -749,7 +757,8 @@ function renderSettings(){
     <p><b>Swap.</b> Machine taken or different gym? "Swap exercise" picks another variant or a custom name for that session only.</p>
     <p><b>Readiness.</b> Sleep + soreness + energy scored out of 15. At 8 or below the session becomes a light day: one set fewer, +1 RIR, ~90% loads. You can override.</p>
     <p><b>Missed sessions.</b> 1–2 missed in a week: skip them, keep going (do one on Sunday if you like). 3+ missed: repeat the week — the banner does it in one tap. Two full weeks off: repeat and start 10% lighter.</p>
-    <p><b>Rest.</b> Timer starts when you enter reps: 2:30 first compound, 2:00 other compounds, 1:15 isolation, 1:00 supersets, 0:45 abs.</p></div>`;
+    <p><b>Rest.</b> Timer starts when you enter reps: 2:30 first compound, 2:00 other compounds, 1:15 isolation, 1:00 supersets, 0:45 abs.</p>
+    <p><b>Offline.</b> Once opened from the home screen the app is cached on the phone and works with no signal; logs sync to the sheet when you are back online. A new version uploaded to GitHub appears the second time you open the app after that.</p></div>`;
 }
 
 /* =========================== EVENTS =========================== */
@@ -778,6 +787,7 @@ $('#main').addEventListener('input',e=>{
   else if(t.id==='waist'){ state.waist=state.waist||{}; if(t.value===''){ delete state.waist[week]; } else state.waist[week]=+t.value; $('#weighLbl').textContent=weighLabel(); save(); }
   else if(t.id==='height'){ state.height=+t.value||160; save(); }
   else if(t.id==='sheetUrl'){ state.sheetUrl=t.value.trim(); save(); }
+  else if(t.id==='syncKey'){ state.syncKey=t.value.trim(); save(); }
   else if(t.id==='cMin'||t.id==='cHr'){ const en=entry(week,d.id,true); en.cardio=en.cardio||{type:$('#cType').value}; en.cardio[t.id==='cMin'?'min':'hr']=t.value===''?null:+t.value; save(); }
 });
 $('#main').addEventListener('change',e=>{
@@ -790,7 +800,7 @@ $('#main').addEventListener('click',async e=>{
   const t=e.target.closest('button'); if(!t) return;
   const d=DAYS[dayIdx];
   if(t.id==='timer'){ const en=entry(week,d.id,true); if(en.dur||!en.startTs){ en.startTs=Date.now(); en.dur=null; toast('Timer started'); } else { en.dur=(Date.now()-en.startTs)/1000; toast('Timer stopped at '+fmtDur(en.dur)); } save(); render(); }
-  else if(t.id==='finish'){ const en=entry(week,d.id,true); en.done=!en.done; if(en.done&&en.startTs&&!en.dur) en.dur=(Date.now()-en.startTs)/1000; if(en.done){ clearInterval(rest.timer); $('#rest').classList.remove('show'); } save(); render(); toast(en.done?'Session logged'+(en.dur?' · '+fmtDur(en.dur):''):'Session reopened'); }
+  else if(t.id==='finish'){ const en=entry(week,d.id,true); en.done=!en.done; if(en.done&&en.startTs&&!en.dur) en.dur=(Date.now()-en.startTs)/1000; if(en.done){ clearInterval(rest.timer); $('#rest').classList.remove('show'); } save(); render(); toast(en.done?'Session logged'+(en.dur?' · '+fmtDur(en.dur):''):'Session reopened'); if(en.done&&state.sheetUrl){ clearTimeout(syncTimer); syncTimer=null; setTimeout(()=>syncToSheet(false),300); } }
   else if(t.dataset.rk){ const en=entry(week,d.id,true); en.ready=en.ready||{}; en.ready[t.dataset.rk]=+t.dataset.rv; en.light=null; save(); render(); }
   else if(t.dataset.light){ const en=entry(week,d.id,true); en.light=t.dataset.light==='on'?null:false; save(); render(); }
   else if(t.dataset.fill!==undefined){ const ei=+t.dataset.fill, slot=d.slots[ei], name=slotName(d,slot,ei,week), en=entry(week,d.id,true), w=+t.dataset.w; en.sets[name]=en.sets[name]||[];
@@ -809,9 +819,10 @@ $('#main').addEventListener('click',async e=>{
   else if(t.dataset.u){ state.unit=t.dataset.u; save(); render(); }
   else if(t.dataset.t){ state.theme=t.dataset.t; applyTheme(); save(); render(); }
   else if(t.dataset.r){ range=t.dataset.r; render(); }
+  else if(t.id==='genKey'){ const words=['iron','river','maple','falcon','cobalt','ember','summit','orbit','tundra','quartz','harbor','lumen','saffron','granite','zephyr','delta']; const k=Array.from({length:4},()=>words[Math.floor(Math.random()*words.length)]).join('-')+'-'+Math.floor(1000+Math.random()*9000); state.syncKey=k; $('#syncKey').value=k; save(); try{ await navigator.clipboard.writeText(k); toast('Passphrase generated and copied'); }catch(e){ toast('Passphrase generated — copy it into the script'); } }
   else if(t.id==='copyScript'){ try{ await navigator.clipboard.writeText(APPS_SCRIPT); toast('Script copied — paste it into Apps Script'); }catch(err){ prompt('Copy this code:',APPS_SCRIPT); } }
-  else if(t.id==='syncNow'){ state.sheetUrl=($('#sheetUrl').value||'').trim(); save(); syncToSheet(true); }
-  else if(t.id==='restoreSheet'){ state.sheetUrl=($('#sheetUrl').value||'').trim(); if(confirm('Replace everything on this phone with the sheet backup?')) restoreFromSheet(); }
+  else if(t.id==='syncNow'){ state.sheetUrl=($('#sheetUrl').value||'').trim(); state.syncKey=($('#syncKey').value||'').trim(); save(); syncToSheet(true); }
+  else if(t.id==='restoreSheet'){ state.sheetUrl=($('#sheetUrl').value||'').trim(); state.syncKey=($('#syncKey').value||'').trim(); if(confirm('Replace everything on this phone with the sheet backup?')) restoreFromSheet(); }
   else if(t.id==='exp'){ try{ await navigator.clipboard.writeText(JSON.stringify(state)); toast('Backup copied'); }catch(err){ prompt('Copy this text:',JSON.stringify(state)); } }
   else if(t.id==='imp'){ const v=prompt('Paste your backup text'); if(!v) return; try{ const s=JSON.parse(v); if(!s.log) throw 0; state=Object.assign(defaultState(),s); applyTheme(); save(); render(); toast('Backup restored'); }catch(err){ toast('That is not a valid backup'); } }
   else if(t.id==='reset'){ if(confirm('Erase every logged set, weigh-in and timer? This cannot be undone.')){ state.log={}; state.body={}; state.waist={}; state.repeats=[]; save(); render(); toast('Logs erased'); } }
@@ -822,6 +833,10 @@ $('#main').addEventListener('pointerdown',chartPointer);
 $('#main').addEventListener('pointermove',e=>{ if(e.pointerType==='mouse'||e.buttons) chartPointer(e); });
 
 let toastT; function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('show'),2000); }
+
+/* =========================== OFFLINE + NETWORK =========================== */
+if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostname==='localhost')){ window.addEventListener('load',()=>{ navigator.serviceWorker.register('sw.js').catch(()=>{}); }); }
+window.addEventListener('online',()=>{ if(state.sheetUrl) syncToSheet(false); const el=document.getElementById('syncStatus'); if(el&&el.textContent.startsWith('Offline')) el.textContent='Back online — syncing'; });
 
 /* =========================== INIT =========================== */
 (async()=>{
